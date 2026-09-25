@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"net"
 	"time"
 
 	refdocker "github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	cont "github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
+	"github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	cont "github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/registry"
+	"github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 	meta "github.com/weaveworks/ignite/pkg/apis/meta/v1alpha1"
 	"github.com/weaveworks/ignite/pkg/preflight"
@@ -41,7 +42,10 @@ var _ runtime.Interface = &dockerClient{}
 
 // GetDockerClient builds a client for talking to docker
 func GetDockerClient() (*dockerClient, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("1.35"))
+	// Pin the REST API version exactly as upstream v0.10.0 did. The moby
+	// client does not validate a fixed version against its negotiation
+	// floor, so requests keep going to /v1.35/... on the node daemon.
+	cli, err := client.New(client.FromEnv, client.WithAPIVersion("1.35"))
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +58,7 @@ func GetDockerClient() (*dockerClient, error) {
 func (dc *dockerClient) PullImage(image meta.OCIImageRef) (err error) {
 	var rc io.ReadCloser
 
-	opts := types.ImagePullOptions{}
+	opts := client.ImagePullOptions{}
 
 	// Get the domain name from the image.
 	named, err := refdocker.ParseDockerRef(image.String())
@@ -75,7 +79,7 @@ func (dc *dockerClient) PullImage(image meta.OCIImageRef) (err error) {
 	}
 	if authCreds != nil {
 		// Encode the credentials and set it in the pull options.
-		authConfig := types.AuthConfig{}
+		authConfig := registry.AuthConfig{}
 		authConfig.Username, authConfig.Password, err = authCreds(refDomain)
 		if err != nil {
 			return err
@@ -98,7 +102,7 @@ func (dc *dockerClient) PullImage(image meta.OCIImageRef) (err error) {
 }
 
 func (dc *dockerClient) InspectImage(image meta.OCIImageRef) (*runtime.ImageInspectResult, error) {
-	res, _, err := dc.client.ImageInspectWithRaw(context.Background(), image.Normalized())
+	res, err := dc.client.ImageInspect(context.Background(), image.Normalized())
 	if err != nil {
 		return nil, err
 	}
@@ -128,15 +132,17 @@ func (dc *dockerClient) InspectImage(image meta.OCIImageRef) (*runtime.ImageInsp
 }
 
 func (dc *dockerClient) ExportImage(image meta.OCIImageRef) (r io.ReadCloser, cleanup func() error, err error) {
-	config, err := dc.client.ContainerCreate(context.Background(), &container.Config{
-		Cmd:   []string{"sh"}, // We need a temporary command, this doesn't need to exist in the image
-		Image: image.Normalized(),
-	}, nil, nil, nil, "")
+	config, err := dc.client.ContainerCreate(context.Background(), client.ContainerCreateOptions{
+		Config: &container.Config{
+			Cmd:   []string{"sh"}, // We need a temporary command, this doesn't need to exist in the image
+			Image: image.Normalized(),
+		},
+	})
 	if err != nil {
 		return
 	}
 
-	if r, err = dc.client.ContainerExport(context.Background(), config.ID); err == nil {
+	if r, err = dc.client.ContainerExport(context.Background(), config.ID, client.ContainerExportOptions{}); err == nil {
 		cleanup = func() error { return dc.RemoveContainer(config.ID) }
 	}
 
@@ -144,17 +150,25 @@ func (dc *dockerClient) ExportImage(image meta.OCIImageRef) (r io.ReadCloser, cl
 }
 
 func (dc *dockerClient) InspectContainer(container string) (*runtime.ContainerInspectResult, error) {
-	res, _, err := dc.client.ContainerInspectWithRaw(context.Background(), container, false)
+	inspect, err := dc.client.ContainerInspect(context.Background(), container, client.ContainerInspectOptions{})
 	if err != nil {
 		return nil, err
+	}
+	res := inspect.Container
+
+	var status string
+	var pid int
+	if res.State != nil {
+		status = string(res.State.Status)
+		pid = res.State.Pid
 	}
 
 	return &runtime.ContainerInspectResult{
 		ID:        res.ID,
 		Image:     res.Image,
-		Status:    res.State.Status,
-		IPAddress: net.ParseIP(res.NetworkSettings.IPAddress),
-		PID:       uint32(res.State.Pid),
+		Status:    status,
+		IPAddress: net.ParseIP(legacyNetworkSettingsIPAddress(inspect.Raw)),
+		PID:       uint32(pid),
 	}, nil
 }
 
@@ -189,33 +203,41 @@ func (dc *dockerClient) RunContainer(image meta.OCIImageRef, config *runtime.Con
 	}
 
 	stopTimeout := int(config.StopTimeout)
-	bindings, exposed := portBindingsToDocker(config.PortBindings)
-
-	c, err := dc.client.ContainerCreate(context.Background(), &container.Config{
-		Hostname:     config.Hostname,
-		ExposedPorts: exposed,
-		Tty:          true, // --tty
-		OpenStdin:    true, // --interactive
-		Cmd:          config.Cmd,
-		Image:        image.Normalized(),
-		Labels:       config.Labels,
-		Env:          config.EnvVars,
-		StopTimeout:  &stopTimeout,
-	}, &container.HostConfig{
-		Binds:        binds,
-		NetworkMode:  container.NetworkMode(config.NetworkMode),
-		PortBindings: bindings,
-		AutoRemove:   config.AutoRemove,
-		CapAdd:       config.CapAdds,
-		Resources: container.Resources{
-			Devices: devices,
-		},
-	}, nil, nil, name)
+	bindings, exposed, err := portBindingsToDocker(config.PortBindings)
 	if err != nil {
 		return "", err
 	}
 
-	return c.ID, dc.client.ContainerStart(context.Background(), c.ID, types.ContainerStartOptions{})
+	c, err := dc.client.ContainerCreate(context.Background(), client.ContainerCreateOptions{
+		Config: &container.Config{
+			Hostname:     config.Hostname,
+			ExposedPorts: exposed,
+			Tty:          true, // --tty
+			OpenStdin:    true, // --interactive
+			Cmd:          config.Cmd,
+			Image:        image.Normalized(),
+			Labels:       config.Labels,
+			Env:          config.EnvVars,
+			StopTimeout:  &stopTimeout,
+		},
+		HostConfig: &container.HostConfig{
+			Binds:        binds,
+			NetworkMode:  container.NetworkMode(config.NetworkMode),
+			PortBindings: bindings,
+			AutoRemove:   config.AutoRemove,
+			CapAdd:       config.CapAdds,
+			Resources: container.Resources{
+				Devices: devices,
+			},
+		},
+		Name: name,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	_, err = dc.client.ContainerStart(context.Background(), c.ID, client.ContainerStartOptions{})
+	return c.ID, err
 }
 
 func (dc *dockerClient) StopContainer(container string, timeout *time.Duration) error {
@@ -226,7 +248,7 @@ func (dc *dockerClient) StopContainer(container string, timeout *time.Duration) 
 	}()
 	<-readyC // wait until removal detection has started
 
-	if err := dc.client.ContainerStop(context.Background(), container, timeout); err != nil {
+	if _, err := dc.client.ContainerStop(context.Background(), container, client.ContainerStopOptions{Timeout: durationToSeconds(timeout)}); err != nil {
 		// If the container is not found, return nil, no-op.
 		if errdefs.IsNotFound(err) {
 			log.Warn(err)
@@ -247,7 +269,7 @@ func (dc *dockerClient) KillContainer(container, signal string) error {
 	}()
 	<-readyC // wait until removal detection has started
 
-	if err := dc.client.ContainerKill(context.Background(), container, signal); err != nil {
+	if _, err := dc.client.ContainerKill(context.Background(), container, client.ContainerKillOptions{Signal: signal}); err != nil {
 		// If the container is not found, return nil, no-op.
 		if errdefs.IsNotFound(err) {
 			log.Warn(err)
@@ -271,7 +293,7 @@ func (dc *dockerClient) RemoveContainer(container string) error {
 	}()
 
 	<-readyC // The ready channel is used to wait until removal detection has started
-	if err := dc.client.ContainerRemove(context.Background(), container, types.ContainerRemoveOptions{}); err != nil {
+	if _, err := dc.client.ContainerRemove(context.Background(), container, client.ContainerRemoveOptions{}); err != nil {
 		// If the container is not found, return nil, no-op.
 		if errdefs.IsNotFound(err) {
 			log.Warn(err)
@@ -285,7 +307,7 @@ func (dc *dockerClient) RemoveContainer(container string) error {
 }
 
 func (dc *dockerClient) ContainerLogs(container string) (io.ReadCloser, error) {
-	return dc.client.ContainerLogs(context.Background(), container, types.ContainerLogsOptions{
+	return dc.client.ContainerLogs(context.Background(), container, client.ContainerLogsOptions{
 		ShowStdout: true, // We only need stdout, as TTY mode merges stderr into it
 	})
 }
@@ -303,7 +325,8 @@ func (dc *dockerClient) PreflightChecker() preflight.Checker {
 }
 
 func (dc *dockerClient) waitForContainer(container string, condition cont.WaitCondition, readyC *chan struct{}) error {
-	resultC, errC := dc.client.ContainerWait(context.Background(), container, condition)
+	wait := dc.client.ContainerWait(context.Background(), container, client.ContainerWaitOptions{Condition: condition})
+	resultC, errC := wait.Result, wait.Error
 
 	// The ready channel can be used to wait until
 	// the container wait request has been sent to
@@ -322,4 +345,31 @@ func (dc *dockerClient) waitForContainer(container string, condition cont.WaitCo
 	}
 
 	return nil
+}
+
+// durationToSeconds converts the optional stop timeout into the whole-second
+// value the Engine API takes, rounding the same way the v20.10 client did
+// (strconv.FormatFloat(d.Seconds(), 'f', 0, 64)).
+func durationToSeconds(timeout *time.Duration) *int {
+	if timeout == nil {
+		return nil
+	}
+	seconds := int(math.Round(timeout.Seconds()))
+	return &seconds
+}
+
+// legacyNetworkSettingsIPAddress reads the top-level NetworkSettings.IPAddress
+// field (the default-bridge address) from the raw inspect body. The pinned
+// API version still returns it, but current moby/moby/api types no longer
+// decode it, and ignite's docker-bridge networking depends on it.
+func legacyNetworkSettingsIPAddress(raw []byte) string {
+	var body struct {
+		NetworkSettings *struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"NetworkSettings"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil || body.NetworkSettings == nil {
+		return ""
+	}
+	return body.NetworkSettings.IPAddress
 }

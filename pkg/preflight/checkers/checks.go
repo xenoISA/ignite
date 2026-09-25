@@ -145,7 +145,7 @@ func runChecks(checks []preflight.Checker, ignoredPreflightErrors sets.String) e
 		}
 	}
 	if errBuffer.Len() > 0 {
-		return fmt.Errorf(errBuffer.String())
+		return fmt.Errorf("%s", errBuffer.String())
 	}
 	return nil
 }

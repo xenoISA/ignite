@@ -7,7 +7,7 @@
 package openapi
 
 import (
-	spec "github.com/go-openapi/spec"
+	spec "k8s.io/kube-openapi/pkg/validation/spec"
 	common "k8s.io/kube-openapi/pkg/common"
 )
 

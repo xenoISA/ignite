@@ -3,15 +3,10 @@
 
 // Added for go1.11 compatibility
 //go:build aix
-// +build aix
 
 package ipv4
 
 const (
-	sysIP_RECVDSTADDR = 0x7
-	sysIP_RECVIF      = 0x20
-	sysIP_RECVTTL     = 0x22
-
 	sizeofIPMreq = 0x8
 )
 

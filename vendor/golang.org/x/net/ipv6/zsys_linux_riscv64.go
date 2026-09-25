@@ -2,17 +2,10 @@
 // cgo -godefs defs_linux.go
 
 //go:build riscv64
-// +build riscv64
 
 package ipv6
 
 const (
-	sysIPV6_NEXTHOP  = 0x9
-	sysIPV6_PKTINFO  = 0x32
-	sysIPV6_HOPLIMIT = 0x34
-	sysIPV6_PATHMTU  = 0x3d
-	sysIPV6_TCLASS   = 0x43
-
 	sizeofKernelSockaddrStorage = 0x80
 	sizeofSockaddrInet6         = 0x1c
 	sizeofInet6Pktinfo          = 0x14

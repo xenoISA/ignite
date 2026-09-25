@@ -4,7 +4,6 @@
 
 // Added for go1.11 compatibility
 //go:build aix
-// +build aix
 
 package ipv4
 
@@ -17,6 +16,9 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// IP_RECVIF is defined on AIX but doesn't work. IP_RECVINTERFACE must be used instead.
+const sockoptReceiveInterface = unix.IP_RECVINTERFACE
 
 var (
 	ctlOpts = [ctlMax]ctlOpt{

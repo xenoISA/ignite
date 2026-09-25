@@ -10,7 +10,7 @@ import (
 	// that we want to use into the binary. (it calls algorithm.Available)
 	_ "crypto/sha256"
 
-	"github.com/containers/image/docker/reference"
+	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 )
 

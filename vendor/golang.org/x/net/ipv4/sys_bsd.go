@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file.
 
 //go:build netbsd || openbsd
-// +build netbsd openbsd
 
 package ipv4
 
@@ -16,6 +15,8 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+const sockoptReceiveInterface = unix.IP_RECVIF
 
 var (
 	ctlOpts = [ctlMax]ctlOpt{

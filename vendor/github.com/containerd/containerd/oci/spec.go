@@ -18,14 +18,22 @@ package oci
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/platforms"
+	"github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/containerd/containerd/containers"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/platforms"
 )
 
 const (
@@ -43,10 +51,26 @@ var (
 // to be created without the "issues" with go vendoring and package imports
 type Spec = specs.Spec
 
+const ConfigFilename = "config.json"
+
+// ReadSpec deserializes JSON into an OCI runtime Spec from a given path.
+func ReadSpec(path string) (*Spec, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var s Spec
+	if err := json.NewDecoder(f).Decode(&s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // GenerateSpec will generate a default spec from the provided image
 // for use as a containerd container
 func GenerateSpec(ctx context.Context, client Client, c *containers.Container, opts ...SpecOpts) (*Spec, error) {
-	return GenerateSpecWithPlatform(ctx, client, platforms.DefaultString(), c, opts...)
+	return GenerateSpecWithPlatform(ctx, client, platforms.Format(platforms.DefaultSpec()), c, opts...) // For 1.7 continue using the old format without os-version included.
 }
 
 // GenerateSpecWithPlatform will generate a default spec from the provided image
@@ -66,15 +90,19 @@ func generateDefaultSpecWithPlatform(ctx context.Context, platform, id string, s
 		return err
 	}
 
-	if plat.OS == "windows" {
+	switch plat.OS {
+	case "windows":
 		err = populateDefaultWindowsSpec(ctx, s, id)
-	} else {
+	case "darwin":
+		err = populateDefaultDarwinSpec(s)
+	default:
 		err = populateDefaultUnixSpec(ctx, s, id)
 		if err == nil && runtime.GOOS == "windows" {
 			// To run LCOW we have a Linux and Windows section. Add an empty one now.
 			s.Windows = &specs.Windows{}
 		}
 	}
+
 	return err
 }
 
@@ -148,10 +176,9 @@ func populateDefaultUnixSpec(ctx context.Context, s *Spec, id string) error {
 				GID: 0,
 			},
 			Capabilities: &specs.LinuxCapabilities{
-				Bounding:    defaultUnixCaps(),
-				Permitted:   defaultUnixCaps(),
-				Inheritable: defaultUnixCaps(),
-				Effective:   defaultUnixCaps(),
+				Bounding:  defaultUnixCaps(),
+				Permitted: defaultUnixCaps(),
+				Effective: defaultUnixCaps(),
 			},
 			Rlimits: []specs.POSIXRlimit{
 				{
@@ -161,63 +188,8 @@ func populateDefaultUnixSpec(ctx context.Context, s *Spec, id string) error {
 				},
 			},
 		},
-		Mounts: []specs.Mount{
-			{
-				Destination: "/proc",
-				Type:        "proc",
-				Source:      "proc",
-				Options:     []string{"nosuid", "noexec", "nodev"},
-			},
-			{
-				Destination: "/dev",
-				Type:        "tmpfs",
-				Source:      "tmpfs",
-				Options:     []string{"nosuid", "strictatime", "mode=755", "size=65536k"},
-			},
-			{
-				Destination: "/dev/pts",
-				Type:        "devpts",
-				Source:      "devpts",
-				Options:     []string{"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"},
-			},
-			{
-				Destination: "/dev/shm",
-				Type:        "tmpfs",
-				Source:      "shm",
-				Options:     []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"},
-			},
-			{
-				Destination: "/dev/mqueue",
-				Type:        "mqueue",
-				Source:      "mqueue",
-				Options:     []string{"nosuid", "noexec", "nodev"},
-			},
-			{
-				Destination: "/sys",
-				Type:        "sysfs",
-				Source:      "sysfs",
-				Options:     []string{"nosuid", "noexec", "nodev", "ro"},
-			},
-			{
-				Destination: "/run",
-				Type:        "tmpfs",
-				Source:      "tmpfs",
-				Options:     []string{"nosuid", "strictatime", "mode=755", "size=65536k"},
-			},
-		},
 		Linux: &specs.Linux{
-			MaskedPaths: []string{
-				"/proc/acpi",
-				"/proc/asound",
-				"/proc/kcore",
-				"/proc/keys",
-				"/proc/latency_stats",
-				"/proc/timer_list",
-				"/proc/timer_stats",
-				"/proc/sched_debug",
-				"/sys/firmware",
-				"/proc/scsi",
-			},
+			MaskedPaths: defaultLinuxMaskedPaths(),
 			ReadonlyPaths: []string{
 				"/proc/bus",
 				"/proc/fs",
@@ -237,6 +209,7 @@ func populateDefaultUnixSpec(ctx context.Context, s *Spec, id string) error {
 			Namespaces: defaultUnixNamespaces(),
 		},
 	}
+	s.Mounts = defaultMounts()
 	return nil
 }
 
@@ -250,4 +223,87 @@ func populateDefaultWindowsSpec(ctx context.Context, s *Spec, id string) error {
 		Windows: &specs.Windows{},
 	}
 	return nil
+}
+
+func populateDefaultDarwinSpec(s *Spec) error {
+	*s = Spec{
+		Version: specs.Version,
+		Root:    &specs.Root{},
+		Process: &specs.Process{Cwd: "/"},
+	}
+	return nil
+}
+
+var cachedDefaultLinuxMaskedPaths = sync.OnceValue(func() []string {
+	maskedPaths := []string{
+		"/proc/acpi",
+		"/proc/asound",
+		"/proc/interrupts",
+		"/proc/kcore",
+		"/proc/keys",
+		"/proc/latency_stats",
+		"/proc/timer_list",
+		"/proc/timer_stats",
+		"/proc/sched_debug",
+		"/sys/firmware",
+		"/sys/devices/virtual/powercap",
+		"/proc/scsi",
+	}
+
+	return appendCPUThrottlePaths(maskedPaths, possibleCPUs())
+})
+
+func defaultLinuxMaskedPaths() []string {
+	return slices.Clone(cachedDefaultLinuxMaskedPaths())
+}
+
+func possibleCPUs() []int {
+	if cpus, err := possibleCPUsParsed(); err == nil && len(cpus) > 0 {
+		return cpus
+	}
+
+	var cpus []int
+	for i := range runtime.NumCPU() {
+		cpus = append(cpus, i)
+	}
+	return cpus
+}
+
+func parsePossibleCPUs(content string) ([]int, error) {
+	if content == "" {
+		return nil, errors.New("empty possible cpu string")
+	}
+	ranges := strings.Split(content, ",")
+	var cpus []int
+	for _, r := range ranges {
+		if rStart, rEnd, ok := strings.Cut(r, "-"); ok {
+			start, err := strconv.Atoi(rStart)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cpu range start %q: %w", rStart, err)
+			}
+			if start < 0 {
+				return nil, fmt.Errorf("negative cpu range start %d", start)
+			}
+			end, err := strconv.Atoi(rEnd)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cpu range end %q: %w", rEnd, err)
+			}
+			if start > end {
+				return nil, fmt.Errorf("invalid cpu range %d-%d: start greater than end", start, end)
+			}
+			for i := start; i <= end; i++ {
+				cpus = append(cpus, i)
+			}
+		} else {
+			cpu, err := strconv.Atoi(rStart)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cpu number %q: %w", rStart, err)
+			}
+			if cpu < 0 {
+				return nil, fmt.Errorf("negative cpu number %d", cpu)
+			}
+			cpus = append(cpus, cpu)
+		}
+	}
+	return cpus, nil
 }

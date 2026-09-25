@@ -2,21 +2,28 @@ package docker
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/network"
 	meta "github.com/weaveworks/ignite/pkg/apis/meta/v1alpha1"
 )
 
-// portBindingsToDocker takes in portMappings and returns a nat.PortMap of the
-// port bindings and a nat.PortSet of the exposed ports for the Docker client
-func portBindingsToDocker(portMappings meta.PortMappings) (nat.PortMap, nat.PortSet) {
-	bindings, exposed := make(nat.PortMap, len(portMappings)), make(nat.PortSet, len(portMappings))
+// portBindingsToDocker takes in portMappings and returns a network.PortMap of
+// the port bindings and a network.PortSet of the exposed ports for the Docker
+// client. An entry the Engine API cannot express is returned as an error
+// rather than silently dropped.
+func portBindingsToDocker(portMappings meta.PortMappings) (network.PortMap, network.PortSet, error) {
+	bindings, exposed := make(network.PortMap, len(portMappings)), make(network.PortSet, len(portMappings))
 
 	for _, portMapping := range portMappings {
-		var hostIP string
+		// The zero netip.Addr marshals to "", matching the previous empty
+		// HostIP string when no bind address is given.
+		var hostIP netip.Addr
 		if portMapping.BindAddress != nil {
-			hostIP = portMapping.BindAddress.String()
+			if addr, ok := netip.AddrFromSlice(portMapping.BindAddress); ok {
+				hostIP = addr.Unmap()
+			}
 		}
 
 		protocol := portMapping.Protocol
@@ -25,9 +32,12 @@ func portBindingsToDocker(portMappings meta.PortMappings) (nat.PortMap, nat.Port
 			protocol = meta.ProtocolTCP
 		}
 
-		port := nat.Port(fmt.Sprintf("%d/%s", portMapping.VMPort, protocol.String()))
+		port, err := network.ParsePort(fmt.Sprintf("%d/%s", portMapping.VMPort, protocol.String()))
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid port mapping %q: %w", portMapping.String(), err)
+		}
 		exposed[port] = struct{}{}
-		bindings[port] = []nat.PortBinding{
+		bindings[port] = []network.PortBinding{
 			{
 				HostIP:   hostIP,
 				HostPort: strconv.FormatUint(portMapping.HostPort, 10),
@@ -35,5 +45,5 @@ func portBindingsToDocker(portMappings meta.PortMappings) (nat.PortMap, nat.Port
 		}
 	}
 
-	return bindings, exposed
+	return bindings, exposed, nil
 }
