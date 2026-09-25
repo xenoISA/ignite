@@ -19,12 +19,8 @@
     "cpus": 2,
     "memory": "2GB",
     "diskSize": "8GB",
-    "network": {
-      
-    },
-    "storage": {
-      
-    },
+    "network": {},
+    "storage": {},
     "ssh": true
   },
   "status": {

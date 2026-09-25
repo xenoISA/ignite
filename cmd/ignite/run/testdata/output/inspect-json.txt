@@ -19,12 +19,8 @@
     "cpus": 0,
     "memory": "0B",
     "diskSize": "0B",
-    "network": {
-      
-    },
-    "storage": {
-      
-    }
+    "network": {},
+    "storage": {}
   },
   "status": {
     "running": false,

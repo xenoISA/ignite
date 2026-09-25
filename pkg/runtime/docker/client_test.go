@@ -50,6 +50,27 @@ func TestPortBindingsToDocker(t *testing.T) {
 	}
 }
 
+func TestPortBindingsRejectMalformedBindAddress(t *testing.T) {
+	_, _, err := portBindingsToDocker(meta.PortMappings{
+		{BindAddress: net.IP{10, 0, 0}, HostPort: 8080, VMPort: 80, Protocol: meta.ProtocolTCP},
+	})
+	if err == nil {
+		t.Fatal("a 3-byte bind address must be rejected, not bound to all interfaces")
+	}
+	// A v4-in-v6 (16-byte) form of an IPv4 address is still accepted.
+	bindings, _, err := portBindingsToDocker(meta.PortMappings{
+		{BindAddress: net.ParseIP("10.0.0.1").To16(), HostPort: 8080, VMPort: 80},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, b := range bindings {
+		if b[0].HostIP.String() != "10.0.0.1" {
+			t.Fatalf("HostIP = %s, want 10.0.0.1", b[0].HostIP)
+		}
+	}
+}
+
 func TestDurationToSeconds(t *testing.T) {
 	if durationToSeconds(nil) != nil {
 		t.Fatal("nil timeout must stay nil so the engine default applies")

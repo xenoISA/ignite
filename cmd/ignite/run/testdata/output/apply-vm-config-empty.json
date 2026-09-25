@@ -19,12 +19,8 @@
     "cpus": 1,
     "memory": "512MB",
     "diskSize": "4GB",
-    "network": {
-      
-    },
-    "storage": {
-      
-    }
+    "network": {},
+    "storage": {}
   },
   "status": {
     "running": false,

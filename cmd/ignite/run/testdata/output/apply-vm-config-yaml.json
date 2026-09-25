@@ -19,12 +19,8 @@
     "cpus": 4,
     "memory": "1500MB",
     "diskSize": "10GB",
-    "network": {
-      
-    },
-    "storage": {
-      
-    },
+    "network": {},
+    "storage": {},
     "ssh": true
   },
   "status": {

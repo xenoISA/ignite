@@ -125,6 +125,10 @@ func TestPs(t *testing.T) {
 				if err != nil {
 					t.Errorf("failed to create VM: %v", err)
 				}
+				// The CREATED column is relative to now, so a fixed timestamp
+				// makes the golden age rot every year. Pin the age instead:
+				// 21 years (plus slack for leap days) renders as "21y ago".
+				vm.SetCreated(runtime.Time{Time: metav1.Time{Time: time.Now().Add(-(21*365 + 2) * 24 * time.Hour)}})
 				vms = append(vms, vm)
 			}
 

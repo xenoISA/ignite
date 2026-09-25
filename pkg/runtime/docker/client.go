@@ -45,6 +45,11 @@ func GetDockerClient() (*dockerClient, error) {
 	// Pin the REST API version exactly as upstream v0.10.0 did. The moby
 	// client does not validate a fixed version against its negotiation
 	// floor, so requests keep going to /v1.35/... on the node daemon.
+	//
+	// Behaviour change from v0.10.0: DOCKER_API_VERSION, when set, now
+	// OVERRIDES this pin (moby's WithAPIVersionFromEnv takes precedence over
+	// WithAPIVersion). The v20.10 client applied WithVersion last, so the env
+	// var was ignored. Leave DOCKER_API_VERSION unset to keep 1.35.
 	cli, err := client.New(client.FromEnv, client.WithAPIVersion("1.35"))
 	if err != nil {
 		return nil, err

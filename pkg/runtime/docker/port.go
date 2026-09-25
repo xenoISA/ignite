@@ -21,9 +21,13 @@ func portBindingsToDocker(portMappings meta.PortMappings) (network.PortMap, netw
 		// HostIP string when no bind address is given.
 		var hostIP netip.Addr
 		if portMapping.BindAddress != nil {
-			if addr, ok := netip.AddrFromSlice(portMapping.BindAddress); ok {
-				hostIP = addr.Unmap()
+			addr, ok := netip.AddrFromSlice(portMapping.BindAddress)
+			if !ok {
+				// Only 4- and 16-byte addresses exist; anything else would
+				// otherwise be sent as "" and silently bind every interface.
+				return nil, nil, fmt.Errorf("invalid bind address in port mapping %q: %d-byte IP", portMapping.String(), len(portMapping.BindAddress))
 			}
+			hostIP = addr.Unmap()
 		}
 
 		protocol := portMapping.Protocol
